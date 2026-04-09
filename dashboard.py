@@ -21,6 +21,11 @@ def get_dashboard_data(db_path=DB_PATH):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
+    # ── System health info ────────────────────────────────────────────────────
+    db_size_bytes = db_path.stat().st_size if db_path.exists() else 0
+    file_count_row = conn.execute("SELECT COUNT(*) as cnt FROM processed_files").fetchone()
+    total_files_tracked = file_count_row["cnt"] if file_count_row else 0
+
     # ── All models (for filter UI) ────────────────────────────────────────────
     model_rows = conn.execute("""
         SELECT COALESCE(model, 'unknown') as model
@@ -140,6 +145,32 @@ def get_dashboard_data(db_path=DB_PATH):
         for r in tool_rows
     ]
 
+    # ── Turn-level data for recent sessions (for expandable rows) ────────────
+    recent_session_ids = [s["session_id"] for s in session_rows[:20]]
+    session_turns_map = {}
+    if recent_session_ids:
+        placeholders = ",".join("?" for _ in recent_session_ids)
+        turn_detail_rows = conn.execute(f"""
+            SELECT session_id, timestamp, model, input_tokens, output_tokens,
+                   cache_read_tokens, cache_creation_tokens, tool_name
+            FROM turns
+            WHERE session_id IN ({placeholders})
+            ORDER BY timestamp ASC
+        """, recent_session_ids).fetchall()
+        for tr in turn_detail_rows:
+            sid = tr["session_id"]
+            if sid not in session_turns_map:
+                session_turns_map[sid] = []
+            session_turns_map[sid].append({
+                "ts": (tr["timestamp"] or "")[:19].replace("T", " "),
+                "model": tr["model"] or "unknown",
+                "input": tr["input_tokens"] or 0,
+                "output": tr["output_tokens"] or 0,
+                "cache_read": tr["cache_read_tokens"] or 0,
+                "cache_creation": tr["cache_creation_tokens"] or 0,
+                "tool": tr["tool_name"] or "",
+            })
+
     conn.close()
 
     return {
@@ -159,6 +190,12 @@ def get_dashboard_data(db_path=DB_PATH):
             "projects_chart":  10,
         },
         "generated_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "system_info": {
+            "db_size_bytes":      db_size_bytes,
+            "total_files_tracked": total_files_tracked,
+            "scan_interval_secs":  SCAN_INTERVAL_SECS,
+        },
+        "session_turns": session_turns_map,
     }
 
 
@@ -247,13 +284,134 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   #project-filter { background: var(--card); border: 1px solid var(--border); color: var(--muted); font-size: 12px; border-radius: 6px; padding: 4px 8px; cursor: pointer; max-width: 200px; }
   #project-filter:hover, #project-filter:focus { border-color: var(--accent); color: var(--text); outline: none; }
 
-  @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
+  /* ── Light theme ─────────────────────────────────────────────────── */
+  .light-theme {
+    --bg:     #F5F5F5;
+    --card:   #FFFFFF;
+    --border: #E0E0E0;
+    --text:   #1A1A1A;
+    --muted:  #6B7280;
+    --accent: #D4603A;
+    --blue:   #3B7DD8;
+    --green:  #2E9E5A;
+  }
+  .light-theme .model-tag { background: rgba(59,125,216,0.10); color: var(--blue); }
+  .light-theme tr:hover td { background: rgba(0,0,0,0.02); }
+  .light-theme .chart-card, .light-theme .stat-card, .light-theme .table-card { box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+
+  /* ── Theme toggle ──────────────────────────────────────────────── */
+  .theme-toggle { background: transparent; border: 1px solid var(--border); color: var(--muted); width: 34px; height: 34px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: border-color 0.2s, color 0.2s; font-size: 16px; flex-shrink: 0; }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--text); }
+
+  /* ── Connection pulse ──────────────────────────────────────────── */
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; flex-shrink: 0; }
+  .status-dot.live { background: var(--green); animation: pulse 2s infinite; }
+  .status-dot.error { background: #E07A5F; }
+  .status-dot.loading { background: var(--muted); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .connection-info { display: flex; align-items: center; font-size: 12px; color: var(--muted); }
+
+  /* ── Skeleton loading ──────────────────────────────────────────── */
+  .skeleton { background: var(--border); border-radius: 4px; animation: shimmer 1.5s infinite; }
+  @keyframes shimmer { 0% { opacity: 0.6; } 50% { opacity: 0.3; } 100% { opacity: 0.6; } }
+  .skeleton-card { height: 90px; }
+  .skeleton-chart { height: 240px; }
+  .skeleton-row { height: 20px; margin-bottom: 8px; }
+  #loading-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.4s; }
+  #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+  .loading-spinner { width: 40px; height: 40px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { color: var(--muted); font-size: 14px; }
+
+  /* ── Search input ──────────────────────────────────────────────── */
+  .table-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+  .search-input { background: var(--bg); border: 1px solid var(--border); color: var(--text); font-size: 12px; border-radius: 6px; padding: 6px 12px; width: 240px; transition: border-color 0.2s; }
+  .search-input:focus { border-color: var(--accent); outline: none; }
+  .search-input::placeholder { color: var(--muted); }
+
+  /* ── Sort indicators ───────────────────────────────────────────── */
+  th.sortable { cursor: pointer; user-select: none; white-space: nowrap; transition: color 0.15s; }
+  th.sortable:hover { color: var(--accent); }
+  th.sortable::after { content: ' \2195'; opacity: 0.3; font-size: 10px; }
+  th.sortable.sort-asc::after { content: ' \2191'; opacity: 1; color: var(--accent); }
+  th.sortable.sort-desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
+
+  /* ── Export buttons ────────────────────────────────────────────── */
+  .export-group { display: flex; gap: 6px; }
+  .export-btn { padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 4px; }
+  .export-btn:hover { border-color: var(--accent); color: var(--text); background: rgba(224,122,95,0.08); }
+  .export-btn svg { width: 12px; height: 12px; }
+
+  /* ── Custom date range ─────────────────────────────────────────── */
+  .date-range-inputs { display: flex; align-items: center; gap: 6px; }
+  .date-input { background: var(--bg); border: 1px solid var(--border); color: var(--text); font-size: 11px; border-radius: 4px; padding: 3px 6px; cursor: pointer; }
+  .date-input:focus { border-color: var(--accent); outline: none; }
+  .date-range-inputs .filter-label { margin: 0; }
+
+  /* ── Expandable session rows ───────────────────────────────────── */
+  .expandable { cursor: pointer; }
+  .expandable td:first-child::before { content: '\25B6'; font-size: 9px; margin-right: 6px; color: var(--muted); transition: transform 0.2s; display: inline-block; }
+  .expandable.expanded td:first-child::before { transform: rotate(90deg); color: var(--accent); }
+  .turn-detail-row td { padding: 6px 12px 6px 36px; font-size: 12px; background: rgba(224,122,95,0.03); border-bottom: 1px solid var(--border); }
+  .turn-detail-row:last-child td { border-bottom: 1px solid var(--border); }
+  .turn-tool-tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; background: rgba(123,168,212,0.12); color: var(--blue); font-family: monospace; }
+
+  /* ── System health panel ───────────────────────────────────────── */
+  .system-panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 24px; }
+  .system-panel-toggle { background: transparent; border: none; color: var(--muted); font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 0; transition: color 0.15s; }
+  .system-panel-toggle:hover { color: var(--text); }
+  .system-panel-toggle::before { content: '\25B6'; font-size: 9px; transition: transform 0.2s; display: inline-block; }
+  .system-panel-toggle.open::before { transform: rotate(90deg); }
+  .system-details { display: none; margin-top: 12px; }
+  .system-details.visible { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .sys-item { font-size: 12px; }
+  .sys-item .sys-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .sys-item .sys-value { font-family: monospace; margin-top: 2px; }
+
+  /* ── Keyboard shortcut hint ────────────────────────────────────── */
+  .kbd { display: inline-block; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; font-size: 10px; font-family: monospace; color: var(--muted); background: var(--bg); }
+  .shortcut-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+  .shortcut-modal.visible { opacity: 1; pointer-events: auto; }
+  .shortcut-content { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 24px 32px; min-width: 360px; max-width: 480px; }
+  .shortcut-content h3 { font-size: 14px; color: var(--accent); margin-bottom: 16px; font-weight: 600; }
+  .shortcut-list { list-style: none; }
+  .shortcut-list li { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; color: var(--text); border-bottom: 1px solid var(--border); }
+  .shortcut-list li:last-child { border-bottom: none; }
+
+  @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } .search-input { width: 100%; } .table-header { flex-direction: column; align-items: flex-start; } .date-range-inputs { flex-wrap: wrap; } }
 </style>
 </head>
 <body>
+<div id="loading-overlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text">Loading dashboard data&hellip;</div>
+</div>
+
+<div id="shortcut-modal" class="shortcut-modal" onclick="toggleShortcuts()">
+  <div class="shortcut-content" onclick="event.stopPropagation()">
+    <h3>Keyboard Shortcuts</h3>
+    <ul class="shortcut-list">
+      <li><span>Toggle theme</span><span class="kbd">T</span></li>
+      <li><span>Refresh data</span><span class="kbd">R</span></li>
+      <li><span>Range: 7 days</span><span class="kbd">1</span></li>
+      <li><span>Range: 30 days</span><span class="kbd">2</span></li>
+      <li><span>Range: 90 days</span><span class="kbd">3</span></li>
+      <li><span>Range: All time</span><span class="kbd">4</span></li>
+      <li><span>Focus search</span><span class="kbd">/</span></li>
+      <li><span>Export CSV</span><span class="kbd">E</span></li>
+      <li><span>Toggle system panel</span><span class="kbd">I</span></li>
+      <li><span>Show shortcuts</span><span class="kbd">?</span></li>
+    </ul>
+  </div>
+</div>
+
 <header>
   <h1>Claude Code Usage Dashboard</h1>
-  <div class="meta" id="meta">Loading...</div>
+  <div class="header-right">
+    <div class="connection-info"><span class="status-dot loading" id="status-dot"></span><span id="meta">Connecting&hellip;</span></div>
+    <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme (T)">&#9790;</button>
+  </div>
 </header>
 
 <div id="filter-bar">
@@ -268,12 +426,24 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="range-btn" data-range="30d" onclick="setRange('30d')">30d</button>
     <button class="range-btn" data-range="90d" onclick="setRange('90d')">90d</button>
     <button class="range-btn" data-range="all" onclick="setRange('all')">All</button>
+    <button class="range-btn" data-range="custom" onclick="showCustomDatePicker()">Custom</button>
+  </div>
+  <div class="filter-sep"></div>
+  <div class="date-range-inputs" id="custom-range" style="display:none">
+    <span class="filter-label">From</span>
+    <input type="date" class="date-input" id="date-from" onchange="onCustomDateChange()">
+    <span class="filter-label">To</span>
+    <input type="date" class="date-input" id="date-to" onchange="onCustomDateChange()">
+    <button class="filter-btn" onclick="clearCustomRange()" title="Clear custom range">&times;</button>
   </div>
   <div class="filter-sep"></div>
   <div class="filter-label">Project</div>
   <select id="project-filter" onchange="onProjectChange(this.value)">
     <option value="all">All Projects</option>
   </select>
+  <div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
+    <span class="kbd" style="cursor:pointer" onclick="toggleShortcuts()" title="Keyboard shortcuts">?</span>
+  </div>
 </div>
 
 <div class="container">
@@ -307,17 +477,48 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="table-card">
-    <div class="section-title">Recent Sessions</div>
+    <div class="table-header">
+      <div class="section-title" style="margin-bottom:0">Recent Sessions</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" class="search-input" id="session-search" placeholder="Search sessions by project, branch, model&hellip;" oninput="onSessionSearch()">
+        <div class="export-group">
+          <button class="export-btn" onclick="exportCSV()" title="Export CSV (E)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12v2h12v-2"/><path d="M8 2v8m0 0l3-3m-3 3L5 7"/></svg>
+            CSV
+          </button>
+          <button class="export-btn" onclick="exportJSON()" title="Export JSON">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12v2h12v-2"/><path d="M8 2v8m0 0l3-3m-3 3L5 7"/></svg>
+            JSON
+          </button>
+        </div>
+      </div>
+    </div>
     <table>
       <thead><tr>
-        <th>Session</th><th>Project</th><th>Branch</th><th>Last Active</th><th>Duration</th>
-        <th>Model</th><th>Turns</th><th>Input</th><th>Output</th><th>Est. Cost</th>
+        <th class="sortable" data-sort="session_id" onclick="sortTable('session_id')">Session</th>
+        <th class="sortable" data-sort="project" onclick="sortTable('project')">Project</th>
+        <th class="sortable" data-sort="branch" onclick="sortTable('branch')">Branch</th>
+        <th class="sortable" data-sort="last" onclick="sortTable('last')">Last Active</th>
+        <th class="sortable" data-sort="duration_min" onclick="sortTable('duration_min')">Duration</th>
+        <th class="sortable" data-sort="model" onclick="sortTable('model')">Model</th>
+        <th class="sortable" data-sort="turns" onclick="sortTable('turns')">Turns</th>
+        <th class="sortable" data-sort="input" onclick="sortTable('input')">Input</th>
+        <th class="sortable" data-sort="output" onclick="sortTable('output')">Output</th>
+        <th class="sortable" data-sort="cost" onclick="sortTable('cost')">Est. Cost</th>
       </tr></thead>
       <tbody id="sessions-body"></tbody>
     </table>
   </div>
   <div class="table-card">
-    <div class="section-title">Cost by Model</div>
+    <div class="table-header">
+      <div class="section-title" style="margin-bottom:0">Cost by Model</div>
+      <div class="export-group">
+        <button class="export-btn" onclick="exportModelCSV()" title="Export model costs CSV">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 12v2h12v-2"/><path d="M8 2v8m0 0l3-3m-3 3L5 7"/></svg>
+          CSV
+        </button>
+      </div>
+    </div>
     <table>
       <thead><tr>
         <th>Model</th><th>Turns</th><th>Input</th><th>Output</th>
@@ -326,17 +527,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <tbody id="model-cost-body"></tbody>
     </table>
   </div>
+  <div class="system-panel" id="system-panel">
+    <button class="system-panel-toggle" id="sys-toggle" onclick="toggleSystemPanel()">System Health &amp; Info</button>
+    <div class="system-details" id="system-details">
+      <div class="sys-item"><div class="sys-label">Database Size</div><div class="sys-value" id="sys-db-size">—</div></div>
+      <div class="sys-item"><div class="sys-label">Files Tracked</div><div class="sys-value" id="sys-files">—</div></div>
+      <div class="sys-item"><div class="sys-label">Scan Interval</div><div class="sys-value" id="sys-interval">—</div></div>
+      <div class="sys-item"><div class="sys-label">Total Models</div><div class="sys-value" id="sys-models">—</div></div>
+      <div class="sys-item"><div class="sys-label">Total Sessions</div><div class="sys-value" id="sys-sessions">—</div></div>
+      <div class="sys-item"><div class="sys-label">Last Updated</div><div class="sys-value" id="sys-updated">—</div></div>
+    </div>
+  </div>
 </div>
 
 <footer>
   <div class="footer-content">
     <p>Cost estimates based on Anthropic API pricing (<a href="https://claude.com/pricing#api" target="_blank">claude.com/pricing#api</a>). Pricing is loaded from <code>config.py</code> — edit it there when rates change. Only models with an explicit entry in the pricing table are included in cost calculations. Actual costs for Max/Pro subscribers differ from API pricing.</p>
     <p>
-      GitHub: <a href="https://github.com/phuryn/claude-usage" target="_blank">https://github.com/phuryn/claude-usage</a>
+      GitHub: <a href="https://github.com/DEADSERPENT/claude-usage" target="_blank">https://github.com/DEADSERPENT/claude-usage</a>
       &nbsp;&middot;&nbsp;
-      Created by: <a href="https://www.productcompass.pm" target="_blank">The Product Compass Newsletter</a>
+      Created by: <a href="https://www.productcompass.pm" target="_blank">DEADSERPENT</a>
       &nbsp;&middot;&nbsp;
       License: MIT
+      &nbsp;&middot;&nbsp;
+      Press <span class="kbd">?</span> for keyboard shortcuts
     </p>
   </div>
 </footer>
@@ -351,12 +565,123 @@ function escapeHTML(str) {
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
-let rawData       = null;
-let selectedModels  = new Set();
-let selectedRange   = '30d';
-let selectedProject = 'all';
-let chartMode       = 'tokens';   // 'tokens' | 'cost'
-let charts          = {};         // charts.dailyMode tracks current daily chart type
+let rawData          = null;
+let selectedModels   = new Set();
+let selectedRange    = '30d';
+let selectedProject  = 'all';
+let chartMode        = 'tokens';   // 'tokens' | 'cost'
+let charts           = {};
+let sessionSortKey   = 'last';
+let sessionSortDir   = 'desc';    // 'asc' | 'desc'
+let sessionSearchQ   = '';
+let customDateFrom   = null;
+let customDateTo     = null;
+let connectionState  = 'loading'; // 'live' | 'error' | 'loading'
+let failCount        = 0;
+let _lastFilteredSessions = [];   // cached for export/sort
+
+// ── Theme ──────────────────────────────────────────────────────────────────
+function initTheme() {
+  const stored = localStorage.getItem('cu-theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = stored || (prefersDark ? 'dark' : 'dark');
+  applyTheme(theme);
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+    if (!localStorage.getItem('cu-theme')) applyTheme(e.matches ? 'dark' : 'light');
+  });
+}
+function applyTheme(theme) {
+  document.body.classList.toggle('light-theme', theme === 'light');
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.innerHTML = theme === 'light' ? '&#9728;' : '&#9790;';
+  if (charts.daily)   updateChartTheme(charts.daily);
+  if (charts.model)   updateChartTheme(charts.model);
+  if (charts.project) updateChartTheme(charts.project);
+  if (charts.tools)   updateChartTheme(charts.tools);
+  if (charts.hourly)  updateChartTheme(charts.hourly);
+}
+function toggleTheme() {
+  const isLight = document.body.classList.contains('light-theme');
+  const next = isLight ? 'dark' : 'light';
+  localStorage.setItem('cu-theme', next);
+  applyTheme(next);
+}
+function getThemeColors() {
+  const isLight = document.body.classList.contains('light-theme');
+  return {
+    gridColor: isLight ? '#E0E0E0' : '#3A3733',
+    tickColor: isLight ? '#6B7280' : '#8C8580',
+    legendColor: isLight ? '#6B7280' : '#8C8580',
+  };
+}
+function updateChartTheme(chart) {
+  if (!chart) return;
+  const c = getThemeColors();
+  try {
+    if (chart.options.scales && chart.options.scales.x) {
+      chart.options.scales.x.ticks.color = c.tickColor;
+      chart.options.scales.x.grid.color = c.gridColor;
+    }
+    if (chart.options.scales && chart.options.scales.y) {
+      chart.options.scales.y.ticks.color = c.tickColor;
+      chart.options.scales.y.grid.color = c.gridColor;
+    }
+    if (chart.options.plugins && chart.options.plugins.legend && chart.options.plugins.legend.labels) {
+      chart.options.plugins.legend.labels.color = c.legendColor;
+    }
+    chart.update('none');
+  } catch(e) {}
+}
+initTheme();
+
+// ── Connection status ──────────────────────────────────────────────────────
+function setConnectionState(state) {
+  connectionState = state;
+  const dot = document.getElementById('status-dot');
+  if (!dot) return;
+  dot.className = 'status-dot ' + state;
+}
+
+// ── Keyboard shortcuts ─────────────────────────────────────────────────────
+function toggleShortcuts() {
+  const m = document.getElementById('shortcut-modal');
+  m.classList.toggle('visible');
+}
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+  const key = e.key;
+  if (key === '?' || (e.shiftKey && key === '/')) { toggleShortcuts(); return; }
+  if (key === 'Escape') { document.getElementById('shortcut-modal').classList.remove('visible'); return; }
+  if (key === 't' || key === 'T') { toggleTheme(); return; }
+  if (key === 'r' || key === 'R') { loadData(); return; }
+  if (key === '1') { setRange('7d'); return; }
+  if (key === '2') { setRange('30d'); return; }
+  if (key === '3') { setRange('90d'); return; }
+  if (key === '4') { setRange('all'); return; }
+  if (key === '/' ) { e.preventDefault(); document.getElementById('session-search').focus(); return; }
+  if (key === 'e' || key === 'E') { exportCSV(); return; }
+  if (key === 'i' || key === 'I') { toggleSystemPanel(); return; }
+});
+
+// ── System panel ───────────────────────────────────────────────────────────
+function toggleSystemPanel() {
+  const btn = document.getElementById('sys-toggle');
+  const details = document.getElementById('system-details');
+  btn.classList.toggle('open');
+  details.classList.toggle('visible');
+}
+function renderSystemPanel(data) {
+  if (!data.system_info) return;
+  const si = data.system_info;
+  const sizeKB = (si.db_size_bytes / 1024).toFixed(1);
+  const sizeMB = (si.db_size_bytes / (1024*1024)).toFixed(2);
+  document.getElementById('sys-db-size').textContent = si.db_size_bytes > 1048576 ? sizeMB + ' MB' : sizeKB + ' KB';
+  document.getElementById('sys-files').textContent = si.total_files_tracked.toLocaleString();
+  document.getElementById('sys-interval').textContent = si.scan_interval_secs + 's';
+  document.getElementById('sys-models').textContent = data.all_models.length;
+  document.getElementById('sys-sessions').textContent = data.sessions_all.length.toLocaleString();
+  document.getElementById('sys-updated').textContent = data.generated_at;
+}
 
 // ── Pricing (served from config.py — no hardcoded values here) ─────────────
 function isBillable(model) {
@@ -414,15 +739,42 @@ const TOKEN_COLORS = {
 const MODEL_COLORS = ['#E07A5F','#7BA8D4','#6DBF8A','#B498DC','#E0B86D','#DC8FB0','#5BB89A','#8AAFD4'];
 
 // ── Time range ─────────────────────────────────────────────────────────────
-const RANGE_LABELS = { '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time' };
-const RANGE_TICKS  = { '7d': 7, '30d': 15, '90d': 13, 'all': 12 };
+const RANGE_LABELS = { '7d': 'Last 7 Days', '30d': 'Last 30 Days', '90d': 'Last 90 Days', 'all': 'All Time', 'custom': 'Custom Range' };
+const RANGE_TICKS  = { '7d': 7, '30d': 15, '90d': 13, 'all': 12, 'custom': 15 };
 
 function getRangeCutoff(range) {
+  if (range === 'custom' && customDateFrom) return customDateFrom;
   if (range === 'all') return null;
   const days = range === '7d' ? 7 : range === '30d' ? 30 : 90;
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d.toISOString().slice(0, 10);
+}
+function getRangeEnd() {
+  if (selectedRange === 'custom' && customDateTo) return customDateTo;
+  return null;
+}
+
+// ── Custom date range ──────────────────────────────────────────────────────
+function onCustomDateChange() {
+  const from = document.getElementById('date-from').value;
+  const to = document.getElementById('date-to').value;
+  if (from) {
+    customDateFrom = from;
+    customDateTo = to || null;
+    selectedRange = 'custom';
+    document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+    updateURL();
+    applyFilter();
+  }
+}
+function clearCustomRange() {
+  customDateFrom = null;
+  customDateTo = null;
+  document.getElementById('date-from').value = '';
+  document.getElementById('date-to').value = '';
+  document.getElementById('custom-range').style.display = 'none';
+  setRange('30d');
 }
 
 function readURLRange() {
@@ -432,11 +784,18 @@ function readURLRange() {
 
 function setRange(range) {
   selectedRange = range;
+  customDateFrom = null;
+  customDateTo = null;
   document.querySelectorAll('.range-btn').forEach(btn =>
     btn.classList.toggle('active', btn.dataset.range === range)
   );
+  document.getElementById('custom-range').style.display = 'none';
   updateURL();
   applyFilter();
+}
+function showCustomDatePicker() {
+  document.getElementById('custom-range').style.display = 'flex';
+  document.getElementById('date-from').focus();
 }
 
 // ── Model filter ───────────────────────────────────────────────────────────
@@ -516,6 +875,94 @@ function onProjectChange(val) {
   applyFilter();
 }
 
+// ── Session search ─────────────────────────────────────────────────────────
+function onSessionSearch() {
+  sessionSearchQ = (document.getElementById('session-search').value || '').toLowerCase().trim();
+  applyFilter();
+}
+
+// ── Table sorting ──────────────────────────────────────────────────────────
+function sortTable(key) {
+  if (sessionSortKey === key) {
+    sessionSortDir = sessionSortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    sessionSortKey = key;
+    sessionSortDir = (key === 'last' || key === 'cost' || key === 'turns' || key === 'input' || key === 'output' || key === 'duration_min') ? 'desc' : 'asc';
+  }
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.sort === sessionSortKey) th.classList.add('sort-' + sessionSortDir);
+  });
+  applyFilter();
+}
+
+function sortSessions(sessions) {
+  const dir = sessionSortDir === 'asc' ? 1 : -1;
+  const key = sessionSortKey;
+  return [...sessions].sort((a, b) => {
+    let va, vb;
+    if (key === 'cost') {
+      va = calcCost(a.model, a.input, a.output, a.cache_read, a.cache_creation);
+      vb = calcCost(b.model, b.input, b.output, b.cache_read, b.cache_creation);
+    } else {
+      va = a[key]; vb = b[key];
+    }
+    if (typeof va === 'string') return dir * va.localeCompare(vb || '');
+    return dir * ((va || 0) - (vb || 0));
+  });
+}
+
+// ── Export functions ────────────────────────────────────────────────────────
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportCSV() {
+  if (!_lastFilteredSessions.length) return;
+  const headers = ['Session','Project','Branch','Last Active','Duration (min)','Model','Turns','Input Tokens','Output Tokens','Cache Read','Cache Creation','Est. Cost'];
+  const rows = _lastFilteredSessions.map(s => [
+    s.session_id, s.project, s.branch, s.last, s.duration_min, s.model,
+    s.turns, s.input, s.output, s.cache_read, s.cache_creation,
+    calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation).toFixed(6)
+  ]);
+  const csv = [headers.join(','), ...rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(','))].join('\n');
+  downloadFile('claude_usage_sessions.csv', csv, 'text/csv');
+}
+
+function exportJSON() {
+  if (!_lastFilteredSessions.length) return;
+  const data = _lastFilteredSessions.map(s => ({
+    ...s, est_cost: calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation)
+  }));
+  downloadFile('claude_usage_sessions.json', JSON.stringify(data, null, 2), 'application/json');
+}
+
+function exportModelCSV() {
+  const tbody = document.getElementById('model-cost-body');
+  if (!tbody || !tbody.innerHTML) return;
+  if (!rawData) return;
+  const lines = ['Model,Turns,Input,Output,Cache Read,Cache Creation,Est. Cost'];
+  const cutoff = getRangeCutoff(selectedRange);
+  const filtered = rawData.daily_by_model.filter(r =>
+    selectedModels.has(r.model) && (!cutoff || r.day >= cutoff)
+  );
+  const modelMap = {};
+  for (const r of filtered) {
+    if (!modelMap[r.model]) modelMap[r.model] = { model: r.model, input: 0, output: 0, cache_read: 0, cache_creation: 0, turns: 0 };
+    const m = modelMap[r.model];
+    m.input += r.input; m.output += r.output; m.cache_read += r.cache_read; m.cache_creation += r.cache_creation; m.turns += r.turns;
+  }
+  for (const m of Object.values(modelMap)) {
+    const cost = calcCost(m.model, m.input, m.output, m.cache_read, m.cache_creation);
+    lines.push([m.model, m.turns, m.input, m.output, m.cache_read, m.cache_creation, cost.toFixed(6)].join(','));
+  }
+  downloadFile('claude_usage_by_model.csv', lines.join('\n'), 'text/csv');
+}
+
 // ── Chart-mode toggle ──────────────────────────────────────────────────────
 function setChartMode(mode) {
   chartMode = mode;
@@ -540,10 +987,11 @@ function applyFilter() {
   if (!rawData) return;
 
   const cutoff = getRangeCutoff(selectedRange);
+  const rangeEnd = getRangeEnd();
 
   // ── Daily token aggregation (model + date range, no project filter) ──────
   const filteredDaily = rawData.daily_by_model.filter(r =>
-    selectedModels.has(r.model) && (!cutoff || r.day >= cutoff)
+    selectedModels.has(r.model) && (!cutoff || r.day >= cutoff) && (!rangeEnd || r.day <= rangeEnd)
   );
 
   const dailyMap = {};
@@ -577,12 +1025,18 @@ function applyFilter() {
     m.turns += r.turns;
   }
 
-  // ── Sessions filtered by model + date + project ───────────────────────────
-  const filteredSessions = rawData.sessions_all.filter(s =>
-    selectedModels.has(s.model) &&
-    (!cutoff || s.last_date >= cutoff) &&
-    (selectedProject === 'all' || s.project === selectedProject)
-  );
+  // ── Sessions filtered by model + date + project + search ─────────────────
+  const filteredSessions = rawData.sessions_all.filter(s => {
+    if (!selectedModels.has(s.model)) return false;
+    if (cutoff && s.last_date < cutoff) return false;
+    if (rangeEnd && s.last_date > rangeEnd) return false;
+    if (selectedProject !== 'all' && s.project !== selectedProject) return false;
+    if (sessionSearchQ) {
+      const hay = (s.session_id + ' ' + s.project + ' ' + s.branch + ' ' + s.model).toLowerCase();
+      if (!hay.includes(sessionSearchQ)) return false;
+    }
+    return true;
+  });
 
   for (const s of filteredSessions) {
     if (modelMap[s.model]) modelMap[s.model].sessions++;
@@ -615,7 +1069,7 @@ function applyFilter() {
 
   // ── Tools aggregation (model + date range filter) ─────────────────────────
   const filteredTools = rawData.tools_daily.filter(r =>
-    selectedModels.has(r.model) && (!cutoff || r.day >= cutoff)
+    selectedModels.has(r.model) && (!cutoff || r.day >= cutoff) && (!rangeEnd || r.day <= rangeEnd)
   );
   const toolMap = {};
   for (const r of filteredTools) toolMap[r.tool] = (toolMap[r.tool] || 0) + r.count;
@@ -648,14 +1102,22 @@ function applyFilter() {
   }
   const byHour = Object.values(hourlyMap).sort((a, b) => a.hour.localeCompare(b.hour));
 
+  // ── Cumulative cost data ─────────────────────────────────────────────────
+  let cumCost = 0;
+  const cumulativeCost = dailyCost.map(d => { cumCost += d.cost; return { day: d.day, cumCost }; });
+
+  const sortedSessions = sortSessions(filteredSessions);
+  _lastFilteredSessions = sortedSessions;
+
   renderStats(totals);
-  renderDailyChart(daily, dailyCost);
+  renderDailyChart(daily, dailyCost, cumulativeCost);
   renderModelChart(byModel);
   renderProjectChart(byProject);
   renderToolsChart(byTool);
   renderHourlyChart(byHour);
-  renderSessionsTable(filteredSessions.slice(0, rawData.ui_limits.sessions_table));
+  renderSessionsTable(sortedSessions.slice(0, rawData.ui_limits.sessions_table));
   renderModelCostTable(byModelForCost);
+  renderSystemPanel(rawData);
 }
 
 // ── Renderers ──────────────────────────────────────────────────────────────
@@ -692,13 +1154,15 @@ function renderStats(t) {
   `).join('');
 }
 
-function renderDailyChart(daily, dailyCost) {
+function renderDailyChart(daily, dailyCost, cumulativeCost) {
   const ctx = document.getElementById('chart-daily').getContext('2d');
+  const tc = getThemeColors();
 
   if (chartMode === 'cost') {
     if (charts.daily && charts.dailyMode === 'cost') {
       charts.daily.data.labels = dailyCost.map(d => d.day);
       charts.daily.data.datasets[0].data = dailyCost.map(d => d.cost);
+      charts.daily.data.datasets[1].data = cumulativeCost.map(d => d.cumCost);
       charts.daily.options.scales.x.ticks.maxTicksLimit = RANGE_TICKS[selectedRange];
       charts.daily.update('none');
       return;
@@ -709,14 +1173,18 @@ function renderDailyChart(daily, dailyCost) {
       type: 'bar',
       data: {
         labels: dailyCost.map(d => d.day),
-        datasets: [{ label: 'Est. Cost ($)', data: dailyCost.map(d => d.cost), backgroundColor: 'rgba(224,122,95,0.75)' }]
+        datasets: [
+          { label: 'Daily Cost ($)', data: dailyCost.map(d => d.cost), backgroundColor: 'rgba(224,122,95,0.75)', order: 2 },
+          { label: 'Cumulative ($)', data: cumulativeCost.map(d => d.cumCost), type: 'line', borderColor: 'rgba(109,191,138,0.9)', backgroundColor: 'rgba(109,191,138,0.1)', fill: false, borderWidth: 2, pointRadius: 0, tension: 0.3, yAxisID: 'y1', order: 1 },
+        ]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { labels: { color: '#8C8580', boxWidth: 12 } } },
+        plugins: { legend: { labels: { color: tc.legendColor, boxWidth: 12 } } },
         scales: {
-          x: { ticks: { color: '#8C8580', maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: '#3A3733' } },
-          y: { ticks: { color: '#8C8580', callback: v => '$' + v.toFixed(3) }, grid: { color: '#3A3733' } },
+          x: { ticks: { color: tc.tickColor, maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: tc.gridColor } },
+          y: { position: 'left', ticks: { color: tc.tickColor, callback: v => '$' + v.toFixed(3) }, grid: { color: tc.gridColor } },
+          y1: { position: 'right', ticks: { color: 'rgba(109,191,138,0.8)', callback: v => '$' + v.toFixed(2) }, grid: { drawOnChartArea: false } },
         }
       }
     });
@@ -749,16 +1217,18 @@ function renderDailyChart(daily, dailyCost) {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8C8580', boxWidth: 12 } } },
+      plugins: { legend: { labels: { color: tc.legendColor, boxWidth: 12 } } },
       scales: {
-        x: { ticks: { color: '#8C8580', maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: '#3A3733' } },
-        y: { ticks: { color: '#8C8580', callback: v => fmt(v) }, grid: { color: '#3A3733' } },
+        x: { ticks: { color: tc.tickColor, maxTicksLimit: RANGE_TICKS[selectedRange] }, grid: { color: tc.gridColor } },
+        y: { ticks: { color: tc.tickColor, callback: v => fmt(v) }, grid: { color: tc.gridColor } },
       }
     }
   });
 }
 
 function renderModelChart(byModel) {
+  const tc = getThemeColors();
+  const borderCol = document.body.classList.contains('light-theme') ? '#FFFFFF' : '#262320';
   if (!byModel.length) {
     if (charts.model) { charts.model.destroy(); charts.model = null; }
     return;
@@ -766,6 +1236,8 @@ function renderModelChart(byModel) {
   if (charts.model) {
     charts.model.data.labels = byModel.map(m => m.model);
     charts.model.data.datasets[0].data = byModel.map(m => m.input + m.output);
+    charts.model.data.datasets[0].borderColor = borderCol;
+    charts.model.options.plugins.legend.labels.color = tc.legendColor;
     charts.model.update('none');
     return;
   }
@@ -774,12 +1246,12 @@ function renderModelChart(byModel) {
     type: 'doughnut',
     data: {
       labels: byModel.map(m => m.model),
-      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: '#262320' }]
+      datasets: [{ data: byModel.map(m => m.input + m.output), backgroundColor: MODEL_COLORS, borderWidth: 2, borderColor: borderCol }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: {
-        legend: { position: 'bottom', labels: { color: '#8C8580', boxWidth: 12, font: { size: 11 } } },
+        legend: { position: 'bottom', labels: { color: tc.legendColor, boxWidth: 12, font: { size: 11 } } },
         tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fmt(ctx.raw)} tokens` } }
       }
     }
@@ -787,6 +1259,7 @@ function renderModelChart(byModel) {
 }
 
 function renderProjectChart(byProject) {
+  const tc = getThemeColors();
   const top = byProject.slice(0, rawData.ui_limits.projects_chart);
   const labels = top.map(p => p.project.length > 22 ? '\u2026' + p.project.slice(-20) : p.project);
   if (!top.length) {
@@ -812,16 +1285,17 @@ function renderProjectChart(byProject) {
     },
     options: {
       indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8C8580', boxWidth: 12 } } },
+      plugins: { legend: { labels: { color: tc.legendColor, boxWidth: 12 } } },
       scales: {
-        x: { ticks: { color: '#8C8580', callback: v => fmt(v) }, grid: { color: '#3A3733' } },
-        y: { ticks: { color: '#8C8580', font: { size: 11 } }, grid: { color: '#3A3733' } },
+        x: { ticks: { color: tc.tickColor, callback: v => fmt(v) }, grid: { color: tc.gridColor } },
+        y: { ticks: { color: tc.tickColor, font: { size: 11 } }, grid: { color: tc.gridColor } },
       }
     }
   });
 }
 
 function renderToolsChart(byTool) {
+  const tc = getThemeColors();
   if (!byTool.length) {
     if (charts.tools) { charts.tools.destroy(); charts.tools = null; }
     return;
@@ -846,14 +1320,15 @@ function renderToolsChart(byTool) {
       indexAxis: 'y', responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
-        x: { ticks: { color: '#8C8580', callback: v => fmt(v) }, grid: { color: '#3A3733' } },
-        y: { ticks: { color: '#8C8580', font: { size: 11 } }, grid: { color: '#3A3733' } },
+        x: { ticks: { color: tc.tickColor, callback: v => fmt(v) }, grid: { color: tc.gridColor } },
+        y: { ticks: { color: tc.tickColor, font: { size: 11 } }, grid: { color: tc.gridColor } },
       }
     }
   });
 }
 
 function renderHourlyChart(byHour) {
+  const tc = getThemeColors();
   function fmtHour(h) {
     const today = new Date().toISOString().slice(0, 10);
     const yest  = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -886,25 +1361,40 @@ function renderHourlyChart(byHour) {
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { labels: { color: '#8C8580', boxWidth: 12 } } },
+      plugins: { legend: { labels: { color: tc.legendColor, boxWidth: 12 } } },
       scales: {
-        x: { ticks: { color: '#8C8580', maxTicksLimit: 24, font: { size: 10 } }, grid: { color: '#3A3733' } },
-        y: { ticks: { color: '#8C8580', callback: v => fmt(v) }, grid: { color: '#3A3733' } },
+        x: { ticks: { color: tc.tickColor, maxTicksLimit: 24, font: { size: 10 } }, grid: { color: tc.gridColor } },
+        y: { ticks: { color: tc.tickColor, callback: v => fmt(v) }, grid: { color: tc.gridColor } },
       }
     }
   });
 }
 
 function renderSessionsTable(sessions) {
-  document.getElementById('sessions-body').innerHTML = sessions.map(s => {
+  const turnsMap = rawData.session_turns || {};
+  document.getElementById('sessions-body').innerHTML = sessions.map((s, idx) => {
     const cost = calcCost(s.model, s.input, s.output, s.cache_read, s.cache_creation);
     const costCell = isBillable(s.model)
       ? `<td class="cost">${fmtCost(cost)}</td>`
       : `<td class="cost-na">n/a</td>`;
     const branchCell = s.branch
       ? `<td class="muted" style="font-size:11px;font-family:monospace">${escapeHTML(s.branch)}</td>`
-      : `<td class="muted">—</td>`;
-    return `<tr>
+      : `<td class="muted">\u2014</td>`;
+    const hasTurns = Object.keys(turnsMap).some(k => k.startsWith(s.session_id.replace(/\u2026/g, '')));
+    const fullSid = Object.keys(turnsMap).find(k => k.startsWith(s.session_id.replace(/\u2026/g, '')));
+    const turnRows = fullSid && turnsMap[fullSid] ? turnsMap[fullSid] : [];
+    const detailHtml = turnRows.length > 0 ? turnRows.slice(0, 15).map(t =>
+      `<tr class="turn-detail-row" data-parent="${idx}" style="display:none">
+        <td colspan="3">${t.tool ? `<span class="turn-tool-tag">${escapeHTML(t.tool)}</span>` : '<span class="muted">\u2014</span>'}</td>
+        <td class="muted" style="font-size:11px">${escapeHTML(t.ts)}</td>
+        <td colspan="2"><span class="model-tag">${escapeHTML(t.model)}</span></td>
+        <td class="num" style="font-size:11px">${fmt(t.input)}</td>
+        <td class="num" style="font-size:11px">${fmt(t.output)}</td>
+        <td class="num" style="font-size:11px">${fmt(t.cache_read)}</td>
+        <td></td>
+      </tr>`
+    ).join('') + (turnRows.length > 15 ? `<tr class="turn-detail-row" data-parent="${idx}" style="display:none"><td colspan="10" class="muted" style="font-size:11px;text-align:center">+ ${turnRows.length - 15} more turns</td></tr>` : '') : '';
+    return `<tr class="expandable" data-idx="${idx}" onclick="toggleSessionExpand(this, ${idx})">
       <td class="muted" style="font-family:monospace">${escapeHTML(s.session_id)}&hellip;</td>
       <td>${escapeHTML(s.project)}</td>
       ${branchCell}
@@ -915,8 +1405,16 @@ function renderSessionsTable(sessions) {
       <td class="num">${fmt(s.input)}</td>
       <td class="num">${fmt(s.output)}</td>
       ${costCell}
-    </tr>`;
+    </tr>${detailHtml}`;
   }).join('');
+}
+
+function toggleSessionExpand(row, idx) {
+  row.classList.toggle('expanded');
+  const isExpanded = row.classList.contains('expanded');
+  document.querySelectorAll(`.turn-detail-row[data-parent="${idx}"]`).forEach(tr => {
+    tr.style.display = isExpanded ? '' : 'none';
+  });
 }
 
 function renderModelCostTable(byModel) {
@@ -941,27 +1439,34 @@ function renderModelCostTable(byModel) {
 let _refreshTimer = null;
 
 async function loadData() {
+  setConnectionState('loading');
   try {
     const resp = await fetch('/api/data');
     const d = await resp.json();
     if (d.error) {
-      document.body.innerHTML = '<div style="padding:40px;color:#f87171">' + escapeHTML(d.error) + '</div>';
+      setConnectionState('error');
+      document.getElementById('meta').textContent = d.error;
       return;
     }
 
+    failCount = 0;
+    setConnectionState('live');
     const isFirstLoad = rawData === null;
     rawData = d;
 
-    // Start the auto-refresh timer exactly once, using the server-supplied interval.
     if (!_refreshTimer) {
       _refreshTimer = setInterval(loadData, d.refresh_ms);
     }
 
     const refreshSecs = Math.round(d.refresh_ms / 1000);
     document.getElementById('meta').textContent =
-      'Updated: ' + d.generated_at + ' \u00b7 Auto-refresh in ' + refreshSecs + 's';
+      'Updated: ' + d.generated_at + ' \u00b7 Auto-refresh ' + refreshSecs + 's';
 
+    // Remove loading overlay on first successful load
     if (isFirstLoad) {
+      const overlay = document.getElementById('loading-overlay');
+      if (overlay) { overlay.classList.add('hidden'); setTimeout(() => overlay.remove(), 500); }
+
       selectedRange = readURLRange();
       document.querySelectorAll('.range-btn').forEach(btn =>
         btn.classList.toggle('active', btn.dataset.range === selectedRange)
@@ -972,6 +1477,10 @@ async function loadData() {
 
     applyFilter();
   } catch(e) {
+    failCount++;
+    setConnectionState('error');
+    document.getElementById('meta').textContent =
+      'Connection lost \u00b7 Retry ' + failCount + (failCount > 3 ? ' \u00b7 Is the server running?' : '');
     console.error(e);
   }
 }
