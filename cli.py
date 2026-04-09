@@ -27,32 +27,22 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, date, timedelta
 
-from config import DB_PATH, PRICING, DAILY_LIMIT_USD, RBAC_ENABLED, ACTIVE_USER
+from config import (
+    DB_PATH,
+    DAILY_LIMIT_USD,
+    RBAC_ENABLED,
+    ACTIVE_USER,
+    get_pricing_for_model,
+    calc_cost as estimate_cost,
+)
 
 
 def get_pricing(model: str) -> dict:
-    if not model:
-        return PRICING["default"]
-    if model in PRICING:
-        return PRICING[model]
-    for key in PRICING:
-        if key != "default" and model.startswith(key):
-            return PRICING[key]
-    m = model.lower()
-    if "opus"   in m: return PRICING.get("claude-opus-4-6",   PRICING["default"])
-    if "sonnet" in m: return PRICING.get("claude-sonnet-4-6", PRICING["default"])
-    if "haiku"  in m: return PRICING.get("claude-haiku-4-5",  PRICING["default"])
-    return PRICING["default"]
+    return get_pricing_for_model(model)
 
 
 def calc_cost(model, inp, out, cache_read, cache_creation):
-    p = get_pricing(model)
-    return (
-        inp            * p["input"]       / 1_000_000 +
-        out            * p["output"]      / 1_000_000 +
-        cache_read     * p["cache_read"]  / 1_000_000 +
-        cache_creation * p["cache_write"] / 1_000_000
-    )
+    return estimate_cost(model, inp, out, cache_read, cache_creation)
 
 def fmt(n):
     if n >= 1_000_000:

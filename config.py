@@ -65,3 +65,36 @@ PRICING: dict[str, dict[str, float]] = {
     "claude-haiku-4-6":  {"input": 1.23,  "output":  6.15, "cache_write": 1.54, "cache_read": 0.12},
     "default":           {"input": 3.69,  "output": 18.45, "cache_write": 4.61, "cache_read": 0.37},
 }
+
+
+def get_pricing_for_model(model: str | None) -> dict[str, float]:
+    """Return the best pricing row for a model name."""
+    model = model or ""
+    p = PRICING.get(model)
+    if p is None:
+        for key in PRICING:
+            if key != "default" and model.startswith(key):
+                p = PRICING[key]
+                break
+    if p is None:
+        ml = model.lower()
+        if "opus" in ml:
+            p = PRICING.get("claude-opus-4-6")
+        elif "sonnet" in ml:
+            p = PRICING.get("claude-sonnet-4-6")
+        elif "haiku" in ml:
+            p = PRICING.get("claude-haiku-4-5")
+    if p is None:
+        p = PRICING.get("default", {})
+    return p
+
+
+def calc_cost(model: str | None, inp: int, out: int, cache_read: int, cache_creation: int) -> float:
+    """Estimate USD cost from token counters using configured pricing."""
+    p = get_pricing_for_model(model)
+    return (
+        inp * p.get("input", 0) / 1_000_000 +
+        out * p.get("output", 0) / 1_000_000 +
+        cache_read * p.get("cache_read", 0) / 1_000_000 +
+        cache_creation * p.get("cache_write", 0) / 1_000_000
+    )

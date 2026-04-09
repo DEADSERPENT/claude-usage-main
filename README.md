@@ -3,44 +3,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![claude-code](https://img.shields.io/badge/claude--code-black?style=flat-square)](https://claude.ai/code)
 
-## Install (v1.0.0)
-
-```bash
-pip install .
-```
-
-After install, use the global command:
-
-```bash
-cu
-```
-
-Core quick checks:
-
-```bash
-cu scan
-cu today
-cu graph --format tree
-cu anomalies
-```
-
-## Daemon Autostart (Windows/Linux/macOS)
-
-Startup templates are included in `scripts/startup`.
-
-- **Windows:** run `scripts/startup/windows-install-task.bat`
-- **Linux (systemd user service):** run `scripts/startup/linux-install-systemd.sh`
-- **macOS (launchd):** run `scripts/startup/macos-install-launchd.sh`
-
-Manual daemon control:
-
-```bash
-cu daemon start
-cu daemon status
-cu daemon log
-cu daemon stop
-```
-
 **Pro and Max subscribers get a progress bar. This gives you the full picture.**
 
 Claude Code writes detailed usage logs locally — token counts, models, sessions, projects — regardless of your plan. This dashboard reads those logs and turns them into charts and cost estimates. Works on API, Pro, and Max plans.
@@ -71,21 +33,23 @@ Captures usage from:
 
 > Anyone running Claude Code already has Python installed.
 
-## Quick Start
+## Quick Start (Run from source in any IDE/terminal)
 
-No `pip install`, no virtual environment, no build step.
+No `pip install`, no virtual environment, no build step required.
 
 ### Windows
-```
+```bash
 git clone https://github.com/DEADSERPENT/claude-usage
 cd claude-usage
+python cli.py scan
 python cli.py dashboard
 ```
 
 ### macOS / Linux
-```
+```bash
 git clone https://github.com/DEADSERPENT/claude-usage
 cd claude-usage
+python3 cli.py scan
 python3 cli.py dashboard
 ```
 
@@ -95,29 +59,9 @@ python3 cli.py dashboard
 
 > On macOS/Linux, use `python3` instead of `python` in all commands below.
 
-### Recommended (installed CLI)
+### Core commands (run from source)
 
 ```bash
-# run all commands via the packaged entrypoint
-cu scan
-cu dashboard
-cu query "tokens > 1M AND model~sonnet"
-cu graph --format mermaid
-cu graph --format tree
-cu graph --format json
-```
-
-### 30-second demo flow
-
-```bash
-cu users add dev "Dev User" viewer
-cu query "tokens > 1M"
-cu anomalies
-cu graph --format tree
-cu replay <session_id_prefix>
-```
-
-```
 # Scan JSONL files and populate the database (~/.claude/usage.db)
 python cli.py scan
 
@@ -129,6 +73,16 @@ python cli.py stats
 
 # Scan + open browser dashboard at http://localhost:8080
 python cli.py dashboard
+
+# Query sessions with DSL filters
+python cli.py query "tokens > 1M AND model~sonnet"
+
+# Detect anomalies and get optimization recommendations
+python cli.py anomalies
+python cli.py optimize
+
+# Launch REST API server on localhost
+python cli.py api
 ```
 
 The scanner is incremental — it tracks each file's path and modification time, so re-running `scan` is fast and only processes new or changed files.
@@ -172,4 +126,9 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard` commands |
+| `cli.py` | Main command entrypoint (`scan`, `today`, `stats`, `dashboard`, etc.) |
+| `api_server.py` | Local REST API for sessions, costs, models, tools, and health |
+| `query_engine.py` | DSL parser/executor for local analytics queries |
+| `anomaly.py` | Usage spike/anomaly detection |
+| `optimizer.py` | Cost optimization recommendations |
+| `archiver.py` | Archive and time-travel helpers for usage history |

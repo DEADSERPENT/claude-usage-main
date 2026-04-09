@@ -14,24 +14,7 @@ import math
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
-from config import DB_PATH, PRICING, ANOMALY_WINDOW_DAYS, ANOMALY_SPIKE_FACTOR
-
-
-def _calc_cost(model: str, inp: int, out: int, cr: int, cc: int) -> float:
-    p = PRICING.get(model)
-    if p is None:
-        for key in PRICING:
-            if key != "default" and model.startswith(key):
-                p = PRICING[key]
-                break
-    if p is None:
-        p = PRICING.get("default", {})
-    return (
-        inp * p.get("input", 0) / 1_000_000 +
-        out * p.get("output", 0) / 1_000_000 +
-        cr  * p.get("cache_read", 0) / 1_000_000 +
-        cc  * p.get("cache_write", 0) / 1_000_000
-    )
+from config import DB_PATH, ANOMALY_WINDOW_DAYS, ANOMALY_SPIKE_FACTOR, calc_cost
 
 
 def _mean_stddev(values: list[float]) -> tuple[float, float]:
@@ -147,13 +130,13 @@ def detect_anomalies(db_path: Path = DB_PATH, window_days: int = None,
         baseline_costs = []
         for r in daily_rows:
             # Rough cost estimate using default pricing for baseline
-            cost = _calc_cost("default", r["inp"] or 0, r["out"] or 0,
-                              r["cr"] or 0, r["cc"] or 0)
+            cost = calc_cost("default", r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cc"] or 0)
             baseline_costs.append(cost)
 
         today_cost = sum(
-            _calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
-                       r["cr"] or 0, r["cc"] or 0)
+            calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
+                      r["cr"] or 0, r["cc"] or 0)
             for r in today_cost_rows
         )
         mean_cost, std_cost = _mean_stddev(baseline_costs)

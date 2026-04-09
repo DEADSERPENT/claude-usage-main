@@ -12,24 +12,7 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
-from config import DB_PATH, PRICING
-
-
-def _calc_cost(model: str, inp: int, out: int, cr: int, cc: int) -> float:
-    p = PRICING.get(model)
-    if p is None:
-        for key in PRICING:
-            if key != "default" and model.startswith(key):
-                p = PRICING[key]
-                break
-    if p is None:
-        p = PRICING.get("default", {})
-    return (
-        inp * p.get("input", 0) / 1_000_000 +
-        out * p.get("output", 0) / 1_000_000 +
-        cr  * p.get("cache_read", 0) / 1_000_000 +
-        cc  * p.get("cache_write", 0) / 1_000_000
-    )
+from config import DB_PATH, PRICING, calc_cost
 
 
 def _model_tier(model: str) -> str:
@@ -140,8 +123,8 @@ def analyze(db_path: Path = DB_PATH, days: int = 30) -> dict:
 
     for r in model_rows:
         tier = _model_tier(r["model"])
-        cost = _calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
-                          r["cr"] or 0, r["cc"] or 0)
+        cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
+                         r["cr"] or 0, r["cc"] or 0)
         total_cost += cost
         tokens = (r["inp"] or 0) + (r["out"] or 0)
 
@@ -235,7 +218,7 @@ def analyze(db_path: Path = DB_PATH, days: int = 30) -> dict:
             "hit_ratio": round(hit_ratio, 4),
         }
         if hit_ratio < 0.3 and total_input > 100_000:
-            savings_if_cached = _calc_cost(r["model"], inp * 0.5, 0, 0, 0) * 0.9
+            savings_if_cached = calc_cost(r["model"], inp * 0.5, 0, 0, 0) * 0.9
             suggestions.append({
                 "type": "cache_optimization",
                 "priority": "medium",
@@ -251,7 +234,7 @@ def analyze(db_path: Path = DB_PATH, days: int = 30) -> dict:
     short_sessions = [s for s in session_rows if (s["turn_count"] or 0) <= 2]
     if len(short_sessions) > len(session_rows) * 0.3 and len(short_sessions) > 5:
         short_cost = sum(
-            _calc_cost(s["model"], s["inp"] or 0, s["out"] or 0, s["cr"] or 0, s["cc"] or 0)
+            calc_cost(s["model"], s["inp"] or 0, s["out"] or 0, s["cr"] or 0, s["cc"] or 0)
             for s in short_sessions
         )
         suggestions.append({

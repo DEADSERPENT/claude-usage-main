@@ -32,23 +32,9 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
-from config import (DB_PATH, PRICING, API_PORT, SCAN_INTERVAL_SECS,
+from config import (DB_PATH, API_PORT, SCAN_INTERVAL_SECS,
                     DAILY_LIMIT_USD, ACTIVE_USER)
-
-
-def _calc_cost(model, inp, out, cr, cc):
-    p = PRICING.get(model)
-    if p is None:
-        for key in PRICING:
-            if key != "default" and model and model.startswith(key):
-                p = PRICING[key]
-                break
-    if p is None:
-        p = PRICING.get("default", {})
-    return (
-        inp * p.get("input", 0) / 1e6 + out * p.get("output", 0) / 1e6 +
-        cr * p.get("cache_read", 0) / 1e6 + cc * p.get("cache_write", 0) / 1e6
-    )
+from config import calc_cost
 
 
 def _get_conn():
@@ -174,7 +160,7 @@ class APIHandler(BaseHTTPRequestHandler):
         for r in rows:
             inp, out = r["inp"] or 0, r["out"] or 0
             cr, cc = r["cr"] or 0, r["cc"] or 0
-            cost = _calc_cost(r["model"], inp, out, cr, cc)
+            cost = calc_cost(r["model"], inp, out, cr, cc)
             models.append({
                 "model": r["model"], "input": inp, "output": out,
                 "cache_read": cr, "cache_creation": cc,
@@ -203,8 +189,8 @@ class APIHandler(BaseHTTPRequestHandler):
         """).fetchone()
         conn.close()
 
-        total_cost = _calc_cost("default", row["inp"] or 0, row["out"] or 0,
-                                row["cr"] or 0, row["cc"] or 0)
+        total_cost = calc_cost("default", row["inp"] or 0, row["out"] or 0,
+                               row["cr"] or 0, row["cc"] or 0)
         self._send_json({
             "input_tokens": row["inp"] or 0, "output_tokens": row["out"] or 0,
             "cache_read": row["cr"] or 0, "cache_creation": row["cc"] or 0,
@@ -233,8 +219,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
         daily = []
         for r in rows:
-            cost = _calc_cost("default", r["inp"] or 0, r["out"] or 0,
-                              r["cr"] or 0, r["cc"] or 0)
+            cost = calc_cost("default", r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cc"] or 0)
             daily.append({
                 "day": r["day"], "input": r["inp"] or 0, "output": r["out"] or 0,
                 "cache_read": r["cr"] or 0, "cache_creation": r["cc"] or 0,
@@ -283,10 +269,10 @@ class APIHandler(BaseHTTPRequestHandler):
 
         sessions = []
         for r in rows:
-            cost = _calc_cost(r["model"], r["total_input_tokens"] or 0,
-                              r["total_output_tokens"] or 0,
-                              r["total_cache_read"] or 0,
-                              r["total_cache_creation"] or 0)
+            cost = calc_cost(r["model"], r["total_input_tokens"] or 0,
+                             r["total_output_tokens"] or 0,
+                             r["total_cache_read"] or 0,
+                             r["total_cache_creation"] or 0)
             sessions.append({
                 "session_id": r["session_id"],
                 "project": r["project_name"],
@@ -368,8 +354,8 @@ class APIHandler(BaseHTTPRequestHandler):
         total_cost = 0
         by_model = []
         for r in rows:
-            cost = _calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
-                              r["cr"] or 0, r["cc"] or 0)
+            cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cc"] or 0)
             total_cost += cost
             by_model.append({
                 "model": r["model"], "cost": round(cost, 6), "turns": r["turns"],
@@ -407,7 +393,7 @@ class APIHandler(BaseHTTPRequestHandler):
         out = today_row["out"] or 0
         cr = today_row["cr"] or 0
         cc = today_row["cc"] or 0
-        today_cost = _calc_cost("default", inp, out, cr, cc)
+        today_cost = calc_cost("default", inp, out, cr, cc)
         today_tokens = inp + out
 
         burn_tokens = (burn_row["t"] or 0) / 120  # per minute
@@ -442,8 +428,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
         models = []
         for r in rows:
-            cost = _calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
-                              r["cr"] or 0, r["cc"] or 0)
+            cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cc"] or 0)
             models.append({
                 "model": r["model"], "input": r["inp"] or 0, "output": r["out"] or 0,
                 "cache_read": r["cr"] or 0, "cache_creation": r["cc"] or 0,
@@ -469,8 +455,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
         projects = []
         for r in rows:
-            cost = _calc_cost("default", r["inp"] or 0, r["out"] or 0,
-                              r["cr"] or 0, r["cc"] or 0)
+            cost = calc_cost("default", r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cc"] or 0)
             projects.append({
                 "project": r["project_name"], "input": r["inp"] or 0,
                 "output": r["out"] or 0, "turns": r["turns"],
@@ -503,8 +489,8 @@ class APIHandler(BaseHTTPRequestHandler):
 
         branches = []
         for r in rows:
-            cost = _calc_cost("default", r["inp"] or 0, r["out"] or 0,
-                              r["cr"] or 0, r["cc"] or 0)
+            cost = calc_cost("default", r["inp"] or 0, r["out"] or 0,
+                             r["cr"] or 0, r["cc"] or 0)
             branches.append({
                 "branch": r["branch"], "input": r["inp"] or 0,
                 "output": r["out"] or 0, "cache_read": r["cr"] or 0,

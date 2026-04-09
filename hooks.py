@@ -35,26 +35,7 @@ import subprocess
 from datetime import date, timedelta
 from pathlib import Path
 
-from config import PRICING
-
-
-# ── Internal cost helper (avoids importing cli.py to prevent circular deps) ──
-
-def _calc_cost(model: str, inp: int, out: int, cache_read: int, cache_creation: int) -> float:
-    p = PRICING.get(model)
-    if p is None:
-        for key in PRICING:
-            if key != "default" and model.startswith(key):
-                p = PRICING[key]
-                break
-    if p is None:
-        p = PRICING.get("default", {})
-    return (
-        inp            * p.get("input",       0) / 1_000_000 +
-        out            * p.get("output",      0) / 1_000_000 +
-        cache_read     * p.get("cache_read",  0) / 1_000_000 +
-        cache_creation * p.get("cache_write", 0) / 1_000_000
-    )
+from config import calc_cost
 
 
 def _today_stats(db_path: Path) -> dict:
@@ -82,7 +63,7 @@ def _today_stats(db_path: Path) -> dict:
         cr  = r["cr"]  or 0;  cc  = r["cc"]  or 0
         total_tokens += inp + out
         total_turns  += r["turns"]
-        total_cost   += _calc_cost(r["model"], inp, out, cr, cc)
+        total_cost   += calc_cost(r["model"], inp, out, cr, cc)
 
     return {
         "daily_cost_usd": round(total_cost, 6),

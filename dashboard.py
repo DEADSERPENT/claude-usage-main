@@ -11,22 +11,15 @@ from datetime import datetime
 
 from datetime import timedelta
 
-from config import DB_PATH, PRICING, SCAN_INTERVAL_SECS, DASHBOARD_PORT, DAILY_LIMIT_USD, ACTIVE_USER
-
-
-def _calc_cost(model, inp, out, cr, cc):
-    p = PRICING.get(model)
-    if p is None:
-        for key in PRICING:
-            if key != "default" and model and model.startswith(key):
-                p = PRICING[key]
-                break
-    if p is None:
-        p = PRICING.get("default", {})
-    return (
-        inp * p.get("input", 0) / 1e6 + out * p.get("output", 0) / 1e6 +
-        cr * p.get("cache_read", 0) / 1e6 + cc * p.get("cache_write", 0) / 1e6
-    )
+from config import (
+    DB_PATH,
+    PRICING,
+    SCAN_INTERVAL_SECS,
+    DASHBOARD_PORT,
+    DAILY_LIMIT_USD,
+    ACTIVE_USER,
+    calc_cost,
+)
 
 
 def get_dashboard_data(db_path=DB_PATH):
@@ -202,8 +195,8 @@ def get_dashboard_data(db_path=DB_PATH):
     """).fetchall()
     branches = []
     for r in branch_rows:
-        cost = _calc_cost("default", r["inp"] or 0, r["out"] or 0,
-                          r["cr"] or 0, r["cc"] or 0)
+        cost = calc_cost("default", r["inp"] or 0, r["out"] or 0,
+                         r["cr"] or 0, r["cc"] or 0)
         branches.append({
             "branch": r["branch"], "input": r["inp"] or 0,
             "output": r["out"] or 0, "turns": r["turns"] or 0,
@@ -244,7 +237,7 @@ def get_dashboard_data(db_path=DB_PATH):
     today_out = today_total_row["out"] or 0
     today_cr = today_total_row["cr"] or 0
     today_cc = today_total_row["cc"] or 0
-    today_cost = _calc_cost("default", today_inp, today_out, today_cr, today_cc)
+    today_cost = calc_cost("default", today_inp, today_out, today_cr, today_cc)
     today_tokens = today_inp + today_out
     burn_pm = (burn_2h_row["t"] or 0) / 120
     cpt = today_cost / max(today_tokens, 1)

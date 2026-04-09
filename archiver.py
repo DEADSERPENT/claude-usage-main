@@ -19,7 +19,7 @@ import os
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
-from config import DB_PATH, ARCHIVE_DIR
+from config import DB_PATH, ARCHIVE_DIR, calc_cost
 
 
 def ensure_archive_dir():
@@ -330,20 +330,6 @@ def time_travel_query(at_datetime: str, db_path: Path = DB_PATH,
         "sources": [],
     }
 
-    from config import PRICING
-
-    def _cost(model, inp, out, cr, cc):
-        p = PRICING.get(model)
-        if p is None:
-            for key in PRICING:
-                if key != "default" and model and model.startswith(key):
-                    p = PRICING[key]
-                    break
-        if p is None:
-            p = PRICING.get("default", {})
-        return (inp * p.get("input", 0) / 1e6 + out * p.get("output", 0) / 1e6 +
-                cr * p.get("cache_read", 0) / 1e6 + cc * p.get("cache_write", 0) / 1e6)
-
     def _aggregate_db(conn, cutoff):
         rows = conn.execute("""
             SELECT COALESCE(model, 'unknown') as model,
@@ -359,7 +345,7 @@ def time_travel_query(at_datetime: str, db_path: Path = DB_PATH,
             model = r["model"]
             inp, out = r["inp"] or 0, r["out"] or 0
             cr, cc = r["cr"] or 0, r["cc"] or 0
-            cost = _cost(model, inp, out, cr, cc)
+            cost = calc_cost(model, inp, out, cr, cc)
 
             result["total_input"] += inp
             result["total_output"] += out
