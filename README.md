@@ -77,8 +77,3 @@ PRs, issues, and ideas are welcome!
 ## 📄 License
 
 MIT License
-
-
-If you want next level:
-👉 I can make a **README that looks like a startup landing page (Stripe-level)**
-```
