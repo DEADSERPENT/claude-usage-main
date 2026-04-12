@@ -78,18 +78,6 @@ PRs, issues, and ideas are welcome!
 
 MIT License
 
-```
-
----
-
-# 🔥 Why this version is better
-
-- **Short → readable in 30 seconds**
-- **High signal → no unnecessary explanation**
-- **Perfect for GitHub + recruiters**
-- **Looks like a real product, not a project**
-
----
 
 If you want next level:
 👉 I can make a **README that looks like a startup landing page (Stripe-level)**
